@@ -3,6 +3,8 @@
 
     python analyze.py daily  [YYYY-MM-DD]   # өдрийн шинжилгээ (анхдагч: сүүлийн өгөгдөлтэй өдөр)
     python analyze.py weekly [YYYY-MM-DD]   # тухайн өдөр агуулсан 7 хоногийн (Да–Ба) шинжилгээ
+    python analyze.py weekly-auto           # автомат: Баасан гарагт энэ 7 хоног, бусад өдөр
+                                            # өмнөх 7 хоногийн тайлан дутуу бол нөхөж гаргана
 
 Оролт : data/deals_YYYY-MM-DD.xlsx   (collect.py үүсгэсэн)
 Гаралт: reports/daily_*.xlsx|txt, reports/weekly_*.xlsx|txt, reports/latest_daily.txt, latest_weekly.txt
@@ -11,7 +13,7 @@ import os
 import re
 import shutil
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -147,7 +149,7 @@ def save_book(path, sheets):
                         cell.number_format = fmt
 
 
-# ---------------------------------------------------------------- текст (Facebook-д илгээх)
+# ---------------------------------------------------------------- тайлангийн текст (Telegram)
 def mn(x):
     if x >= 1e9:
         return f"{x / 1e9:,.2f} тэрбум ₮"
@@ -336,6 +338,37 @@ def run_weekly(arg=None):
     return 0
 
 
+def ub_today():
+    if os.environ.get("TODAY"):  # туршилтад
+        return date.fromisoformat(os.environ["TODAY"])
+    return (datetime.now(timezone.utc) + timedelta(hours=8)).date()  # Улаанбаатар UTC+8
+
+
+def week_path(monday):
+    iso = monday.isocalendar()
+    return REPORT_DIR / f"weekly_{iso.year}-W{iso.week:02d}.xlsx"
+
+
+def run_weekly_auto():
+    """Баасан гарагт энэ 7 хоногийг гаргана. Бусад өдөр өмнөх 7 хоногийн тайлан
+    хараахан гараагүй бол (жишээ нь Баасан гарагийн ажил алдагдсан) нөхөж гаргана.
+    Бирж хэдэн өдөр ажиллаагүй ч байгаа өдрүүдээр тайлан гарна."""
+    today = ub_today()
+    monday = today - timedelta(days=today.weekday())
+    if today.weekday() == 4:
+        target = monday
+    else:
+        target = monday - timedelta(days=7)
+        if week_path(target).exists():
+            print("Өмнөх 7 хоногийн тайлан гарсан тул алгасав.")
+            return 0
+    end = target + timedelta(days=6)
+    if not [d for d in all_days() if target <= date.fromisoformat(d) <= end]:
+        print(f"{target} долоо хоногт арилжааны өгөгдөл алга — тайлан гаргахгүй.")
+        return 0
+    return run_weekly(target.isoformat())
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
     arg = sys.argv[2] if len(sys.argv) > 2 else None
@@ -343,5 +376,7 @@ if __name__ == "__main__":
         sys.exit(run_daily(arg))
     if mode == "weekly":
         sys.exit(run_weekly(arg))
+    if mode == "weekly-auto":
+        sys.exit(run_weekly_auto())
     print(__doc__)
     sys.exit(2)
