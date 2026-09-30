@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Шинжилгээний тайланг Telegram руу илгээнэ (текст + Excel файл).
+"""Шинжилгээний тайланг Telegram руу ЭГ НЭГ мессежээр илгээнэ (хэсэглэхгүй).
 
     python send_telegram.py reports/latest_daily.txt reports/daily_2026-09-29.xlsx
 
@@ -27,6 +27,15 @@ import uuid
 from pathlib import Path
 
 LIMIT = 4096  # Telegram-ийн нэг мессежийн дээд урт
+
+
+def fit(text):
+    """Тайланг хэсэглэхгүй, нэг мессеж болгоно. analyze.py аль хэдийн MAX_CHARS-д багтаасан байдаг;
+    хэрэв 4096-аас хэтэрвэл (алдаатай тохиргоо) сүүлчийн бүтэн догол мөрөөр таслана."""
+    if len(text) <= LIMIT:
+        return text
+    cut = text.rfind("\n\n", 0, LIMIT - 3)
+    return text[: cut if cut > 0 else LIMIT - 3].rstrip() + "\n…"
 
 
 def call(url, data, files=None):
@@ -77,7 +86,7 @@ def main():
 
     api = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/") + f"/bot{token}"
     try:
-        call(api + "/sendMessage", {"chat_id": chat, "text": text[:LIMIT], "disable_web_page_preview": "true"})
+        call(api + "/sendMessage", {"chat_id": chat, "text": fit(text), "disable_web_page_preview": "true"})
         for f in files:
             call(api + "/sendDocument", {"chat_id": chat, "caption": f.name}, {"document": f})
     except urllib.error.HTTPError as e:
