@@ -1,30 +1,61 @@
-name: Collect MSE deals
+name: Collect and analyze MSE deals
 
 on:
   schedule:
     # Даваа–Баасан 05:30 UTC = Улаанбаатарын цагаар 13:30 (арилжаа 13:00-д дуусна)
     - cron: "30 5 * * 1-5"
-  workflow_dispatch:   # гараар ажиллуулах товч
+  workflow_dispatch:
+    inputs:
+      weekly:
+        description: "7 хоногийн шинжилгээг мөн ажиллуулах"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+env:
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
 jobs:
-  collect:
+  run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - name: Collect deals
+      - run: pip install openpyxl pandas
+
+      - name: 1. Хэлцэл цуглуулах
         run: python collect.py
-      - name: Commit results
+
+      - name: 2. Өдрийн шинжилгээ
+        if: always()
+        run: python analyze.py daily
+
+      - name: 3. Өдрийн тайланг Telegram руу илгээх
+        if: always()
+        continue-on-error: true
+        run: python send_telegram.py reports/latest_daily.txt
+
+      - name: 4. 7 хоногийн шинжилгээ
         if: always()
         run: |
+          if [ "${{ inputs.weekly }}" = "true" ]; then
+            python analyze.py weekly
+          else
+            python analyze.py weekly-auto
+          fi
+          python send_telegram.py reports/latest_weekly.txt || true
+
+      - name: 5. Үр дүнг хадгалах (commit)
+        if: always()
+        run: |
+          mkdir -p data reports
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data
-          git diff --cached --quiet || git commit -m "MSE deals $(date -u +%F)"
+          git add data reports
+          git diff --cached --quiet || git commit -m "MSE deals & reports $(date -u +%F)"
           git push
