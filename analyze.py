@@ -37,6 +37,9 @@ SINGLE_MOVE = float(os.environ.get("SINGLE_MOVE", 2.0))             # үнийн
 CLOSE_GAP = float(os.environ.get("CLOSE_GAP", 1.0))                 # хаалт-VWAP зөрүүний босго (%)
 MIN_DEALS = 5
 MAX_CHARS = int(os.environ.get("MAX_CHARS", 3500))                   # тайлангийн дээд урт (Telegram-ийн хязгаар 4096)
+HUGE_VALUE = float(os.environ.get("HUGE_VALUE", 1_000_000_000))      # онцгой том хэлцлийн босго (₮)
+HUGE_SHARE = float(os.environ.get("HUGE_SHARE", 50))                # эсвэл компанийн өдрийн дүнгийн энэ %-аас дээш
+HUGE_FLOOR = float(os.environ.get("HUGE_FLOOR", 300_000_000))       # (гэхдээ дор хаяж энэ дүнтэй)
 MIN_LIQ = float(os.environ.get("MIN_LIQ", 1_000_000))                # хөрвөх чадварын өөрчлөлтөд орох доод дүн (₮)
 
 WEEKDAYS = ["Даваа", "Мягмар", "Лхагва", "Пүрэв", "Баасан", "Бямба", "Ням"]
@@ -57,12 +60,31 @@ def all_days():
     return sorted(days)
 
 
+def flag_huge(df):
+    """Онцгой том хэлцэл: нэг компанийн нэг секундэд нэгтгэсэн хэлцэл нь HUGE_VALUE-аас дээш,
+    эсвэл тухайн компанийн өдрийн дүнгийн HUGE_SHARE%-аас дээш (мөн HUGE_FLOOR-оос дээш) бол онцгой."""
+    if df.empty:
+        return pd.Series([], dtype=bool).to_numpy()
+    g = df.groupby(["sym", "dt"], sort=False)["val"].sum()
+    ct = df.groupby("sym")["val"].sum().reindex(g.index.get_level_values("sym")).to_numpy()
+    v = g.to_numpy()
+    mask = (v >= HUGE_VALUE) | ((v >= HUGE_FLOOR) & (v / ct >= HUGE_SHARE / 100))
+    return pd.MultiIndex.from_frame(df[["sym", "dt"]]).isin(g.index[mask])
+
+
 def load_day(d):
     df = pd.read_excel(DATA_DIR / f"deals_{d}.xlsx", sheet_name="ALL").rename(columns=RENAME)
     df["dt"] = pd.to_datetime(df["dt"])
     df["cond"] = df["cond"].fillna("").astype(str)
     df["day"] = df["dt"].dt.strftime("%Y-%m-%d")
-    return df.sort_values(["dt", "id"]).reset_index(drop=True)
+    df = df.sort_values(["dt", "id"]).reset_index(drop=True)
+    df["huge"] = flag_huge(df)
+    return df
+
+
+def core_of(df):
+    """Ердийн арилжаа: онцгой том хэлцлийг оруулалгүй."""
+    return df[~df["huge"]].reset_index(drop=True)
 
 
 def official_close(g):
@@ -79,7 +101,17 @@ def official_close(g):
 def day_stats(d):
     """Өмнөх өдрийн суурь: хаалт = тэр өдрийн нийт хэлцлийн жигнэсэн дундаж ханш."""
     return {sym: {"close": round(g["val"].sum() / g["qty"].sum(), 2)}
-            for sym, g in load_day(d).groupby("sym")}
+            for sym, g in core_of(load_day(d)).groupby("sym")}
+
+
+def prev_closes(before, n=5):
+    """Өмнөх хаалт: сүүлийн n арилжааны өдрөөс, компани бүрийн хамгийн сүүлийн хаалт.
+    Өмнөх өдөр нь арилжаагүй компани ч өмнөх мэдэгдэж буй хаалтаа авна."""
+    prev = {}
+    for d in reversed(before[-n:]):
+        for sym, v in day_stats(d).items():
+            prev.setdefault(sym, dict(v))   # хамгийн сүүлийн өдөр давамгайлна
+    return prev
 
 
 # ---------------------------------------------------------------- тооцоолол
@@ -89,7 +121,7 @@ def executions(df):
     Нэгтгэсэн үнэ = жигнэсэн дундаж (Σ үнэ×ширхэг / Σ ширхэг)."""
     e = df.groupby(["sym", "dt"], sort=False).agg(
         n=("id", "count"), qty=("qty", "sum"), val=("val", "sum"),
-        pmin=("px", "min"), pmax=("px", "max"),
+        pmin=("px", "min"), pmax=("px", "max"), huge=("huge", "max"),
         cond=("cond", lambda c: ", ".join(sorted({x for x in c if x})))).reset_index()
     e["px"] = e["val"] / e["qty"]
     return e
@@ -151,7 +183,7 @@ def summarize(df, prev=None):
 
 def definitions():
     return pd.DataFrame({"Нэр томьёо": ["Хаалт", "VWAP", "Албан ёсны хаалт", "Өөрчлөлт (%)", "Сүүлийн цаг − хаалт (%)",
-                                        COL_IMPACT, "Нэгтгэсэн хэлцэл", "Хөрвөх чадварын өөрчлөлт"],
+                                        COL_IMPACT, "Нэгтгэсэн хэлцэл", "Хөрвөх чадварын өөрчлөлт", "Онцгой том хэлцэл"],
                          "Тодорхойлолт": [
         "Сүүлийн арилжааны өдрийн (10:00–13:00) НИЙТ хэлцлийн жигнэсэн дундаж ханш = Σ(үнэ×ширхэг) / Σ ширхэг",
         "Тайлангийн бүх хугацааны нийт арилжааны жигнэсэн дундаж ханш (өдрийн тайланд хаалттай тэнцүү)",
@@ -162,7 +194,10 @@ def definitions():
         "Нэг компанийн, яг ижил секундэд биелсэн хэлцлүүдийг нэг хэлцэл гэж тооцсон. Нэг том захиалга хэд хэдэн "
         "жижиг захиалгатай таарахад олон мөр үүсдэг. Нэгтгэсэн үнэ = жигнэсэн дундаж, ширхэг ба дүн = нийлбэр",
         "Компанийн арилжааны дүнг өмнөх өдөртэй (7 хоногийн тайланд өдрийн дундажаар өмнөх 7 хоногтой) харьцуулсан. "
-        "Нэмэгдэх нь хөрвөх чадвар сайжирсан, буурах нь муудсан гэсэн үг"]})
+        "Нэмэгдэх нь хөрвөх чадвар сайжирсан, буурах нь муудсан гэсэн үг",
+        f"Нэгтгэсэн хэлцэл нь {HUGE_VALUE / 1e9:g} тэрбум ₮-өөс дээш, эсвэл компанийн өдрийн дүнгийн {HUGE_SHARE:.0f}%-аас дээш "
+        f"(мөн {HUGE_FLOOR / 1e6:g} сая ₮-өөс дээш) бол онцгой. Индекс, хаалт, хөрвөх чадвар, цаг, үсрэлтийн тооцоонд оруулаагүй "
+        "(ердийн арилжаа). Оруулсан тоо нь 'Тойм (онцгой хэлцэлтэй)' хуудсанд байна"]})
 
 
 def block_table(df, n=50):
@@ -184,12 +219,25 @@ def biggest_by_company(df):
     return b.sort_values("val", ascending=False).reset_index(drop=True)
 
 
+def huge_table(df):
+    e = executions(df)
+    h = e[e["huge"]].sort_values("val", ascending=False).copy()
+    tot, ct = df["val"].sum(), df.groupby("sym")["val"].sum()
+    h["mkt"] = h["val"] / tot * 100
+    h["co"] = [v / ct[s_] * 100 for v, s_ in zip(h["val"], h["sym"])]
+    return h[["sym", "dt", "n", "qty", "px", "val", "mkt", "co", "cond"]].rename(columns={
+        "sym": "Symbol", "dt": "Огноо цаг", "n": "Нэгтгэсэн хэлцэл (тоо)", "qty": "Ширхэг", "px": "Үнэ (жигнэсэн дундаж)",
+        "val": "Дүн (₮)", "mkt": "Нийт арилжаанд эзлэх (%)", "co": "Компанийн дүнд эзлэх (%)", "cond": "Нөхцөл"})
+
+
 def biggest_table(df):
-    b = biggest_by_company(df)
-    return b[["sym", "dt", "n", "qty", "px", "pmin", "pmax", "val", "mkt", "co", "cond"]].rename(columns={
+    b = biggest_by_company(df).copy()
+    b["huge"] = b["huge"].map({True: "Тийм", False: ""})
+    return b[["sym", "dt", "n", "qty", "px", "pmin", "pmax", "val", "mkt", "co", "cond", "huge"]].rename(columns={
         "sym": "Symbol", "dt": "Огноо цаг", "n": "Нэгтгэсэн хэлцэл (тоо)", "qty": "Ширхэг",
         "px": "Үнэ (жигнэсэн дундаж)", "pmin": "Доод үнэ", "pmax": "Дээд үнэ", "val": "Дүн (₮)",
-        "mkt": "Нийт арилжаанд эзлэх (%)", "co": "Компанийн эргэлтэд эзлэх (%)", "cond": "Нөхцөл"})
+        "mkt": "Нийт арилжаанд эзлэх (%)", "co": "Компанийн эргэлтэд эзлэх (%)", "cond": "Нөхцөл",
+        "huge": "Онцгой"})
 
 
 def jump_table(df, n=100):
@@ -268,7 +316,14 @@ def px(x):
 
 
 def sm(x):
+    if x >= 1e9:
+        return f"{x / 1e9:.2f} тэрбум"
     return f"{x / 1e6:.1f} сая" if x >= 1e6 else f"{x / 1e3:.0f} мянга"
+
+
+def p0(v):
+    """Хувь: 10-аас бага бол 1 орон, бусад нь бүхэл тоо (0% гэж харагдахаас сэргийлнэ)."""
+    return f"{v:.1f}%" if v < 10 else f"{v:,.0f}%"
 
 
 def wd(day):
@@ -303,14 +358,14 @@ def liq_table(cur, base):
 
 
 # ---- блокууд: мөр бүхий жагсаалт буцаана
-def index_block(s, weekly=False):
+def index_block(s, weekly=False, tag=""):
     w, ch = s["Эргэлт (₮)"], s["Өөрчлөлт (%)"]
     eq, vw = ch.mean(), (ch * w).sum() / w.sum()
     up, dn = int((ch > 0.05).sum()), int((ch < -0.05).sum())
     contrib = ch * w / w.sum()
     lo, hi = contrib.idxmin(), contrib.idxmax()
     L = [f"📈 МХБ-н 20{' (7 хоног)' if weekly else ''}: тэнцүү {pct(eq)} · жигнэсэн {pct(vw)} · "
-         f"↑{up} ↓{dn} ={len(s) - up - dn} ({basis_text(s, weekly)})"]
+         f"↑{up} ↓{dn} ={len(s) - up - dn} ({basis_text(s, weekly)}{tag})"]
     parts = []
     if contrib[lo] < 0:
         parts.append(f"татсан {s.loc[lo, 'Symbol']} {contrib[lo]:+.2f} п.п.")
@@ -322,14 +377,14 @@ def index_block(s, weekly=False):
     return L
 
 
-def price_block(s, weekly=False, limit=None):
+def price_block(s, weekly=False, limit=None, tag=""):
     rows = s if limit is None else s.head(limit)
     if weekly:
-        L = ["💱 7 хоногийн жигнэсэн дундаж → хаалт (өөрчлөлт) · мужийн өргөн % · арилжааны дүн:"]
+        L = [f"💱 7 хоногийн жигнэсэн дундаж → хаалт (өөрчлөлт) · мужийн өргөн % · арилжааны дүн{tag}:"]
         L += [f"{r['Symbol']} {px(r['VWAP'])} → {px(r['Хаалт'])} ({pct(r['Өөрчлөлт (%)'])}) · {r['Хэлбэлзэл (%)']:.1f}% · {sm(r['Эргэлт (₮)'])}"
               for _, r in rows.iterrows()]
     else:
-        L = ["💱 Хаалт (өдрийн жигнэсэн дундаж ханш, өөрчлөлт) · арилжааны дүн · хэлцэл:"]
+        L = [f"💱 Хаалт (өдрийн жигнэсэн дундаж ханш, өөрчлөлт) · арилжааны дүн · хэлцэл{tag}:"]
         L += [f"{r['Symbol']} {px(r['Хаалт'])} ({pct(r['Өөрчлөлт (%)'])}) · {sm(r['Эргэлт (₮)'])} · {int(r['Хэлцэл'])} хэлцэл"
               for _, r in rows.iterrows()]
     return L
@@ -360,10 +415,10 @@ def close_block(s):
         L.append("🔺 Төгсгөлд хүчирхэгжсэн (дээгүүр): " + ", ".join(
             f"{r['Symbol']} {pct(r[col])}" for _, r in strong.iterrows()))
     t2 = s[(s["Өөрчлөлт (%)"].abs() >= SINGLE_MOVE) & (s["Хамгийн том хэлцлийн эзлэх (%)"] >= SINGLE_SHARE)]
-    for _, r in t2.sort_values("Өөрчлөлт (%)", key=lambda x: -x.abs()).iterrows():
-        mg = f", {int(r['Хамгийн том хэлцлийн нэгтгэсэн тоо'])} хэлцэл нэгтгэсэн" if r["Хамгийн том хэлцлийн нэгтгэсэн тоо"] > 1 else ""
-        L.append(f"⚠️ Нэг хэлцлээр хөдөлсөн байж болзошгүй: {r['Symbol']} {pct(r['Өөрчлөлт (%)'])} — эргэлтийн "
-                 f"{r['Хамгийн том хэлцлийн эзлэх (%)']:.0f}% нь ганц хэлцэл ({int(r['Хамгийн том хэлцэл (ш)']):,} ш{mg})")
+    if len(t2):
+        t2 = t2.sort_values("Өөрчлөлт (%)", key=lambda x: -x.abs()).head(5)
+        L.append("⚠️ Нэг хэлцлээр хөдөлсөн байж болзошгүй (арилжааны дүнгийн хэдэн % нь ганц хэлцэл): " + ", ".join(
+            f"{r['Symbol']} {pct(r['Өөрчлөлт (%)'])} ({r['Хамгийн том хэлцлийн эзлэх (%)']:.0f}%)" for _, r in t2.iterrows()))
     return L
 
 
@@ -409,8 +464,27 @@ def biggest_block(df, weekly=False, limit=None):
         when = f"{SHORT_WD[r['dt'].weekday()]} {r['dt']:%H:%M:%S}" if weekly else f"{r['dt']:%H:%M:%S}"
         m = f" ×{int(r['n'])}" if r["n"] > 1 else ""
         c = " SI" if "Sell Imbalance" in r["cond"] else ""
-        L.append(f"{i + 1}. {r['sym']} {when} · {sm(r['val'])} · {r['mkt']:.2f}% · {r['co']:.0f}%{m}{c}")
-    L.append("×N = нэг секундэд нэг компанийн N хэлцлийг нэгтгэсэн (нэг захиалга байж болзошгүй) · SI = Sell Imbalance")
+        st = " ★" if r["huge"] else ""
+        L.append(f"{i + 1}. {r['sym']} {when} · {sm(r['val'])} · {r['mkt']:.2f}% · {r['co']:.0f}%{m}{c}{st}")
+    L.append("×N = нэг секундэд нэг компанийн N хэлцлийг нэгтгэсэн (нэг захиалга байж болзошгүй) · SI = Sell Imbalance"
+             + (" · ★ = онцгой том хэлцэл" if b["huge"].any() else ""))
+    return L
+
+
+def huge_block(df, weekly=False, k=4):
+    e = executions(df)
+    h = e[e["huge"]].sort_values("val", ascending=False)
+    if h.empty:
+        return []
+    tot, ct = df["val"].sum(), df.groupby("sym")["val"].sum()
+    L = [f"🐋 Онцгой том хэлцэл (≥{HUGE_VALUE / 1e9:g} тэрбум ₮ эсвэл компанийн дүнгийн {HUGE_SHARE:.0f}%+; доорх тооцоонд ОРООГҮЙ):"]
+    for _, r in h.head(k).iterrows():
+        when = f"{SHORT_WD[r['dt'].weekday()]} {r['dt']:%H:%M:%S}" if weekly else f"{r['dt']:%H:%M:%S}"
+        m = f" ×{int(r['n'])}" if r["n"] > 1 else ""
+        L.append(f"{r['sym']} {when} · {int(r['qty']):,} ш × {px(r['px'])} = {mn(r['val'])}{m} · "
+                 f"нийт арилжааны {r['val'] / tot * 100:.1f}% · {r['sym']}-ийн {r['val'] / ct[r['sym']] * 100:.0f}%")
+    if len(h) > k:
+        L.append(f"… бусад {len(h) - k} онцгой хэлцэл (Excel-ийн \"Онцгой том хэлцэл\" хуудсанд)")
     return L
 
 
@@ -424,7 +498,8 @@ def liquidity_block(s, span, change=None, k=3):
 
         def f(r):
             ratio = r[2] / r[1]
-            return f"{r[0]} {r[1] / 1e6:.1f}→{r[2] / 1e6:.1f} ({f'{ratio:.1f}×' if ratio >= 2 else f'{r[3] * 100:+.0f}%'})"
+            rt = (f"{ratio:.1f}×" if ratio < 100 else f"{ratio:.0f}×") if ratio >= 2 else f"{r[3] * 100:+.0f}%"
+            return f"{r[0]} {r[1] / 1e6:,.1f}→{r[2] / 1e6:,.1f} ({rt})"
 
         if up or dn:
             L[0] += f" (арилжааны дүн, сая ₮; {label})"
@@ -435,9 +510,9 @@ def liquidity_block(s, span, change=None, k=3):
     best = s.sort_values(COL_IMPACT).head(3)
     thin = s[s[COL_IMPACT] >= THIN_PCT].sort_values(COL_IMPACT, ascending=False).head(6)
     line = f"{ORDER_SIZE / 1e6:g} сая ₮ захиалга / {span} арилжааны дүн: сайн " + ", ".join(
-        f"{r['Symbol']} {r[COL_IMPACT]:.0f}%" for _, r in best.iterrows())
+        f"{r['Symbol']} {p0(r[COL_IMPACT])}" for _, r in best.iterrows())
     if len(thin):
-        line += f" · сул ({THIN_PCT:.0f}%+) " + ", ".join(f"{r['Symbol']} {r[COL_IMPACT]:.0f}%" for _, r in thin.iterrows())
+        line += f" · сул ({THIN_PCT:.0f}%+) " + ", ".join(f"{r['Symbol']} {p0(r[COL_IMPACT])}" for _, r in thin.iterrows())
     L.append(line)
     return L
 
@@ -481,39 +556,47 @@ def blk(p, lines=None, drop=True, fn=None, n=None, nmin=12):
     return {"p": p, "lines": lines or [], "drop": drop, "fn": fn, "n": n, "nmin": nmin}
 
 
-def daily_text(day, df, s, liq=None, prev=None):
-    total = df["val"].sum()
-    head = [f"📊 МХБ {day} ({wd(day)}) · {len(df):,} хэлцэл · {mn(total)} · {len(s)} компани"]
+def daily_text(day, df_all, core, s, liq=None, prev=None):
+    total_all, total = df_all["val"].sum(), core["val"].sum()
+    hg = bool(df_all["huge"].any())
+    tag = "; онцгой хэлцэлгүй" if hg else ""
+    head = [f"📊 МХБ {day} ({wd(day)}) · {len(df_all):,} хэлцэл · {mn(total_all)}"
+            + (f" (онцгойгүй {len(core):,} хэлцэл · {mn(total)})" if hg else "") + f" · {len(s)} компани"]
     if prev:
         pday, pval, pdeals = prev
         head.append(f"Өмнөх өдөртэй ({pday[5:]}) харьцуулахад арилжааны дүн {pct((total / pval - 1) * 100)} "
-                    f"({mn(pval)} → {mn(total)}), хэлцэл {pdeals:,} → {len(df):,}")
+                    f"({mn(pval)} → {mn(total)}), хэлцэл {pdeals:,} → {len(core):,}" + (" (онцгойгүй)" if hg else ""))
     blocks = [
         blk(0, head),
-        blk(1, index_block(s)),
-        blk(2, fn=lambda n: price_block(s, limit=n), n=len(s), drop=False),
+        blk(0, huge_block(df_all)),
+        blk(1, index_block(s, tag=tag)),
+        blk(2, fn=lambda n: price_block(s, limit=n, tag=" · онцгойгүй" if hg else ""), n=len(s), drop=False),
         blk(2, movers_block(s)),
         blk(2, close_block(s)),
         blk(3, pin_block(s)),
-        blk(3, hours_block(df)),
-        blk(4, jumps_block(df)),
-        blk(2, fn=lambda n: biggest_block(df, limit=n), n=len(s), drop=False),
+        blk(3, hours_block(core)),
+        blk(4, jumps_block(core)),
+        blk(2, fn=lambda n: biggest_block(df_all, limit=n), n=len(s), drop=False),
         blk(1, liquidity_block(s, "өдрийн", liq)),
         blk(0, [DISCLAIMER]),
     ]
     return assemble(blocks)
 
 
-def weekly_text(iso_label, week, df, s, prev_avg, liq, wk):
-    total = df["val"].sum()
-    head = [f"📊 МХБ 7 хоног {iso_label} ({week[0][5:]} → {week[-1][5:]}) · {len(df):,} хэлцэл · {mn(total)} · "
-            f"{len(week)} арилжааны өдөр · {len(s)} компани"]
+def weekly_text(iso_label, week, df_all, df, s, prev_avg, liq, wk):
+    total_all, total = df_all["val"].sum(), df["val"].sum()
+    hg = bool(df_all["huge"].any())
+    tag = "; онцгой хэлцэлгүй" if hg else ""
+    head = [f"📊 МХБ 7 хоног {iso_label} ({week[0][5:]} → {week[-1][5:]}) · {len(df_all):,} хэлцэл · {mn(total_all)}"
+            + (f" (онцгойгүй {mn(total)})" if hg else "") + f" · {len(week)} арилжааны өдөр · {len(s)} компани"]
     if prev_avg:
-        head.append(f"Өдрийн дундаж арилжааны дүн өмнөх 7 хоногоос {pct((total / len(week) / prev_avg - 1) * 100)}")
-    days = ["📅 Өдөр бүр (арилжааны дүн · хэлцэл · МХБ-н 20 тэнцүү/жигнэсэн өөрчлөлт):"]
+        head.append(f"Өдрийн дундаж арилжааны дүн өмнөх 7 хоногоос {pct((total / len(week) / prev_avg - 1) * 100)}"
+                    + (" (онцгойгүй)" if hg else ""))
+    days = ["📅 Өдөр бүр (арилжааны дүн · хэлцэл · МХБ-н 20 тэнцүү/жигнэсэн өөрчлөлт" + (", онцгойгүй" if hg else "") + "):"]
     for _, r in wk["days"].iterrows():
         idx = f"{r['eq']:+.2f}% / {r['vw']:+.2f}%" if pd.notna(r["eq"]) else "—"
-        days.append(f"{r['Гараг'][:2]} {sm(r['val'])} · {int(r['deals']):,} · {idx}")
+        extra = f" (нийт {sm(r['val_all'])})" if r["val_all"] - r["val"] > 1 else ""
+        days.append(f"{r['Гараг'][:2]} {sm(r['val'])}{extra} · {int(r['deals']):,} · {idx}")
     streak = []
     if wk["n_ret"] >= 3:
         ups = wk["updays"]
@@ -539,13 +622,14 @@ def weekly_text(iso_label, week, df, s, prev_avg, liq, wk):
             corr.append("🔗 Эсрэг хөдөлсөн: " + ", ".join(f"{a}–{b} {r:+.2f}" for a, b, r in neg[["a", "b", "r"]].itertuples(index=False)))
     blocks = [
         blk(0, head),
+        blk(0, huge_block(df_all, weekly=True)),
         blk(1, days),
-        blk(1, index_block(s, weekly=True)),
-        blk(2, fn=lambda n: price_block(s, weekly=True, limit=n), n=len(s), drop=False),
+        blk(1, index_block(s, weekly=True, tag=tag)),
+        blk(2, fn=lambda n: price_block(s, weekly=True, limit=n, tag=" · онцгойгүй" if hg else ""), n=len(s), drop=False),
         blk(2, movers_block(s)),
         blk(2, close_block(s)),
         blk(3, streak),
-        blk(2, fn=lambda n: biggest_block(df, weekly=True, limit=n), n=len(s), drop=False),
+        blk(2, fn=lambda n: biggest_block(df_all, weekly=True, limit=n), n=len(s), drop=False),
         blk(1, liquidity_block(s, "7 хоногийн", liq)),
         blk(4, volb),
         blk(5, corr),
@@ -570,34 +654,41 @@ def run_daily(arg=None):
     if day not in days:
         print(f"{day} өдрийн файл олдсонгүй.")
         return 1
-    df = load_day(day)
-    if df.empty:
+    df_all = load_day(day)
+    if df_all.empty:
         print("Хэлцэл алга.")
         return 1
+    core = core_of(df_all)
+    if core.empty:
+        core = df_all
     earlier = [d for d in days if d < day]
-    s = summarize(df, day_stats(earlier[-1]) if earlier else None)
+    prev = prev_closes(earlier) if earlier else None
+    s = summarize(core, prev)
     liq, prev_info = None, None
     if earlier:
-        pdf = load_day(earlier[-1])
+        pdf = core_of(load_day(earlier[-1]))
         base = pdf.groupby("sym")["val"].sum().to_dict()
-        cur = df.groupby("sym")["val"].sum().to_dict()
+        cur = core.groupby("sym")["val"].sum().to_dict()
         liq = (cur, base, "өмнөх өдрөөс")
         prev_info = (earlier[-1], float(pdf["val"].sum()), len(pdf))
-    sheets = {
-        "Тойм": s,
-        "Цагаар": hourly(df),
-        "Том хэлцэл (компаниар)": biggest_table(df),
-        "Том хэлцэл": block_table(df),
-        "Үнийн үсрэлт": jump_table(df),
-        "Нөхцөлтэй хэлцэл": condition_table(df),
+    sheets = {"Тойм": s}
+    if df_all["huge"].any():
+        sheets["Онцгой том хэлцэл"] = huge_table(df_all)
+        sheets["Тойм (онцгой хэлцэлтэй)"] = summarize(df_all, prev)
+    sheets.update({
+        "Цагаар": hourly(core),
+        "Том хэлцэл (компаниар)": biggest_table(df_all),
+        "Том хэлцэл": block_table(df_all),
+        "Үнийн үсрэлт": jump_table(core),
+        "Нөхцөлтэй хэлцэл": condition_table(df_all),
         "Тайлбар": definitions(),
-    }
+    })
     if liq:
         sheets = {**{k: v for k, v in sheets.items() if k != "Тайлбар"},
                   "Хөрвөх чадварын өөрчлөлт": liq_table(liq[0], liq[1]), "Тайлбар": sheets["Тайлбар"]}
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     save_book(REPORT_DIR / f"daily_{day}.xlsx", sheets)
-    write_text(REPORT_DIR / f"daily_{day}.txt", "latest_daily.txt", daily_text(day, df, s, liq, prev_info))
+    write_text(REPORT_DIR / f"daily_{day}.txt", "latest_daily.txt", daily_text(day, df_all, core, s, liq, prev_info))
     print(f"Өдрийн шинжилгээ бэлэн: {REPORT_DIR}/daily_{day}.xlsx")
     return 0
 
@@ -607,7 +698,7 @@ def prev_for_week(days, monday):
     before = [d for d in days if date.fromisoformat(d) < monday]
     if not before:
         return None
-    prev = day_stats(before[-1])                     # өмнөх хаалт: өмнөх арилжааны өдрийнх
+    prev = prev_closes(before)                       # өмнөх хаалт (өмнөх өдрүүдийн хамгийн сүүлийнх)
     pw = [d for d in before if date.fromisoformat(d) >= monday - timedelta(days=7)]
     if pw:                                           # өмнөх VWAP: өмнөх 7 хоногийн нийт арилжаанаас
         pdf = pd.concat([load_day(d) for d in pw], ignore_index=True)
@@ -627,7 +718,10 @@ def run_weekly(arg=None):
     if not week:
         print("Тухайн 7 хоногт өгөгдөл алга.")
         return 1
-    df = pd.concat([load_day(d) for d in week], ignore_index=True).sort_values(["dt", "id"]).reset_index(drop=True)
+    df_all = pd.concat([load_day(d) for d in week], ignore_index=True).sort_values(["dt", "id"]).reset_index(drop=True)
+    df = core_of(df_all)                           # ердийн арилжаа (онцгой том хэлцэлгүй)
+    if df.empty:
+        df = df_all
     prev = prev_for_week(days, monday)
     s = summarize(df, prev)
 
@@ -660,19 +754,21 @@ def run_weekly(arg=None):
     if len(week) >= 4:  # 3+ өдрийн өгөөж байж хамаарал утга агуулна
         corr = ret.T.corr(min_periods=3).round(2).rename_axis(index="Symbol", columns=None).reset_index()
         sheets["Хамаарал"] = corr
-    sheets.update({"Том хэлцэл (компаниар)": biggest_table(df), "Том хэлцэл": block_table(df), "Үнийн үсрэлт": jump_table(df),
-                   "Цагаар": hourly(df), "Нөхцөлтэй хэлцэл": condition_table(df), "Тайлбар": definitions()})
+    if df_all["huge"].any():
+        sheets = {"Тойм": sheets["Тойм"], "Онцгой том хэлцэл": huge_table(df_all),
+                  "Тойм (онцгой хэлцэлтэй)": summarize(df_all, prev), **{k: v for k, v in sheets.items() if k != "Тойм"}}
+    sheets.update({"Том хэлцэл (компаниар)": biggest_table(df_all), "Том хэлцэл": block_table(df_all), "Үнийн үсрэлт": jump_table(df),
+                   "Цагаар": hourly(df), "Нөхцөлтэй хэлцэл": condition_table(df_all), "Тайлбар": definitions()})
 
     iso = monday.isocalendar()
     label = f"{iso.year}-W{iso.week:02d}"
     prev_days = [d for d in days if monday - timedelta(days=7) <= date.fromisoformat(d) < monday]
-    prev_avg = sum(load_day(d)["val"].sum() for d in prev_days) / len(prev_days) if prev_days else None
+    prev_avg = sum(core_of(load_day(d))["val"].sum() for d in prev_days) / len(prev_days) if prev_days else None
 
     # өдөр бүрийн индекс, дараалсан өсөлт/уналт, хамаарал (хаалт = өдрийн жигнэсэн дундаж ханш)
     g_val, g_qty = df.groupby(["sym", "day"])["val"].sum(), df.groupby(["sym", "day"])["qty"].sum()
     dvw, dv = (g_val / g_qty).unstack("day"), g_val.unstack("day").fillna(0.0)
-    prevc = pd.Series({k: v["close"] for k, v in (prev or {}).items()}, dtype=float).reindex(dvw.index) if prev else \
-        pd.Series(float("nan"), index=dvw.index)
+    prevc = pd.Series({k: v["close"] for k, v in (prev or {}).items() if v.get("close")}, dtype=float).reindex(dvw.index)
     rch = dvw.div(dvw.ffill(axis=1).shift(1, axis=1)) - 1
     rch[dvw.columns[0]] = dvw[dvw.columns[0]] / prevc - 1
     rows_ = []
@@ -683,6 +779,8 @@ def run_weekly(arg=None):
                       "vw": (c_[m_] * w_).sum() / w_.sum() * 100 if w_.sum() > 0 else float("nan")})
     day_idx = pd.DataFrame(rows_)
     days_tbl = mkt.rename(columns={"Огноо": "day", "Хэлцэл": "deals", "Эргэлт (₮)": "val"})[["day", "Гараг", "deals", "val"]].merge(day_idx, on="day")
+    days_tbl["val_all"] = days_tbl["day"].map(df_all.groupby("day")["val"].sum())
+    mkt["Нийт дүн, онцгойтой (₮)"] = mkt["Огноо"].map(df_all.groupby("day")["val"].sum())
     mkt["МХБ-н 20 тэнцүү (%)"] = days_tbl["eq"].values
     mkt["МХБ-н 20 жигнэсэн (%)"] = days_tbl["vw"].values
     n_ret = int(rch.notna().any(axis=0).sum())
@@ -696,7 +794,7 @@ def run_weekly(arg=None):
 
     liq = None
     if prev_days:
-        base = pd.concat([load_day(d) for d in prev_days]).groupby("sym")["val"].sum() / len(prev_days)
+        base = pd.concat([core_of(load_day(d)) for d in prev_days]).groupby("sym")["val"].sum() / len(prev_days)
         cur = df.groupby("sym")["val"].sum() / len(week)
         liq = (cur.to_dict(), base.to_dict(), "өмнөх 7 хоногоос, өдрийн дундажаар")
     elif len(week) >= 2:  # өмнөх 7 хоногийн өгөгдөл байхгүй: сүүлийн өдрийг 7 хоногийн өмнөх өдрүүдтэй харьцуулна
@@ -711,7 +809,7 @@ def run_weekly(arg=None):
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     save_book(REPORT_DIR / f"weekly_{label}.xlsx", sheets)
     write_text(REPORT_DIR / f"weekly_{label}.txt", "latest_weekly.txt",
-               weekly_text(label, week, df, s, prev_avg, liq, wk))
+               weekly_text(label, week, df_all, df, s, prev_avg, liq, wk))
     print(f"7 хоногийн шинжилгээ бэлэн: {REPORT_DIR}/weekly_{label}.xlsx ({len(week)} өдөр)")
     return 0
 
