@@ -12,6 +12,7 @@
 Заавал биш:
     TELEGRAM_API_URL     анхдагч https://api.telegram.org (туршилтад)
     DRY_RUN=1            илгээхгүй, зөвхөн харуулна
+    FORCE_SEND=true      өмнө илгээсэн ч дахин илгээнэ (туршилтад)
 
 Тохируулаагүй бол чимээгүй алгасна. Ижил тайланг давхар илгээхээс сэргийлж
 reports/sent.json-д хэш хадгална.
@@ -94,8 +95,8 @@ def main():
     if photo:
         h.update(photo.read_bytes())
     digest = h.hexdigest()
-    if digest in sent:
-        print("Энэ тайланг өмнө нь илгээсэн тул алгасав.")
+    if digest in sent and os.environ.get("FORCE_SEND", "").lower() != "true":
+        print("Энэ тайланг өмнө нь илгээсэн тул алгасав. (Дахин илгээх бол Run workflow дээр \"force\"-г сонгоно)")
         return 0
 
     api = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/") + f"/bot{token}"
