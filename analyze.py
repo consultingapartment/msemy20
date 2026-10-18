@@ -3,8 +3,7 @@
 
     python analyze.py daily  [YYYY-MM-DD]   # өдрийн шинжилгээ (анхдагч: сүүлийн өгөгдөлтэй өдөр)
     python analyze.py weekly [YYYY-MM-DD]   # тухайн өдөр агуулсан 7 хоногийн (Да–Ба) шинжилгээ
-    python analyze.py weekly-auto           # автомат: Баасан гарагт энэ 7 хоног, бусад өдөр
-                                            # өмнөх 7 хоногийн тайлан дутуу бол нөхөж гаргана
+    python analyze.py weekly-auto           # автомат: ЗӨВХӨН Баасан гарагт энэ 7 хоногийн (Да–Ба) тайланг гаргана
 
 Оролт : data/deals_YYYY-MM-DD.xlsx   (collect.py үүсгэсэн)
 Гаралт: reports/daily_*.xlsx|txt, reports/weekly_*.xlsx|txt, reports/latest_daily.txt, latest_weekly.txt
@@ -44,6 +43,7 @@ MIN_LIQ = float(os.environ.get("MIN_LIQ", 1_000_000))                # хөрв�
 
 WEEKDAYS = ["Даваа", "Мягмар", "Лхагва", "Пүрэв", "Баасан", "Бямба", "Ням"]
 SHORT_WD = ["Да", "Мя", "Лх", "Пү", "Ба", "Бя", "Ня"]
+DISCLAIMER_SHORT = "⚠️ Хөрөнгө оруулалтын зөвлөгөө биш."
 DISCLAIMER = "⚠️ Энэ нь хөрөнгө оруулалтын зөвлөгөө биш, зөвхөн биелсэн хэлцлийн статистик тойм юм."
 RENAME = {"Огноо цаг": "dt", "Symbol": "sym", "Үнэ (₮)": "px", "Ширхэг": "qty",
           "Дүн (₮)": "val", "Нөхцөл": "cond", "ID": "id"}
@@ -639,6 +639,91 @@ def weekly_text(iso_label, week, df_all, df, s, prev_avg, liq, wk):
     return assemble(blocks)
 
 
+def weekly_ctx(label, week, df_all, df, s, prev_avg, liq, wk):
+    """7 хоногийн зургийг зурахад хэрэгтэй бүх өгөгдөл (render_image.py-д дамжуулна)."""
+    total_all, total = float(df_all["val"].sum()), float(df["val"].sum())
+    ct = df_all.groupby("sym")["val"].sum()
+    e = executions(df_all)
+    h = e[e["huge"]].sort_values("val", ascending=False)
+    huge = [dict(sym=r.sym, when=f"{SHORT_WD[r.dt.weekday()]} {r.dt:%H:%M:%S}", qty=int(r.qty), px=float(r.px), val=float(r.val),
+                 mkt=r.val / total_all * 100, co=r.val / ct[r.sym] * 100, n=int(r.n)) for r in h.itertuples()]
+    days = [dict(d=r["Гараг"][:2], val=float(r["val"]), val_all=float(r["val_all"]), deals=int(r["deals"]),
+                 eq=None if pd.isna(r["eq"]) else float(r["eq"]), vw=None if pd.isna(r["vw"]) else float(r["vw"]))
+            for _, r in wk["days"].iterrows()]
+    w_, ch = s["Эргэлт (₮)"], s["Өөрчлөлт (%)"]
+    contrib = ch * w_ / w_.sum()
+    lo, hi = contrib.idxmin(), contrib.idxmax()
+    index = dict(eq=float(ch.mean()), vw=float((ch * w_).sum() / w_.sum()), up=int((ch > 0.05).sum()), dn=int((ch < -0.05).sum()),
+                 basis=basis_text(s, True), top4=float(s.head(4)["Эзлэх хувь (%)"].sum()),
+                 pull=(s.loc[lo, "Symbol"], float(contrib[lo])) if contrib[lo] < 0 else None,
+                 push=(s.loc[hi, "Symbol"], float(contrib[hi])) if contrib[hi] > 0 else None)
+    index["flat"] = len(s) - index["up"] - index["dn"]
+    prices = [dict(sym=r["Symbol"], vwap=float(r["VWAP"]), close=float(r["Хаалт"]), chg=float(r["Өөрчлөлт (%)"]),
+                   rng=float(r["Хэлбэлзэл (%)"]), val=float(r["Эргэлт (₮)"])) for _, r in s.iterrows()]
+    t = s[s["Хэлцэл"] >= MIN_DEALS]
+    up3 = [(r["Symbol"], float(r["Өөрчлөлт (%)"])) for _, r in t[t["Өөрчлөлт (%)"] > 0].sort_values("Өөрчлөлт (%)", ascending=False).head(3).iterrows()]
+    dn3 = [(r["Symbol"], float(r["Өөрчлөлт (%)"])) for _, r in t[t["Өөрчлөлт (%)"] < 0].sort_values("Өөрчлөлт (%)").head(3).iterrows()]
+    col = "Сүүлийн цаг − хаалт (%)"
+    weak = [(r["Symbol"], float(r[col])) for _, r in t[t[col] <= -CLOSE_GAP].sort_values(col).head(3).iterrows()]
+    strong = [(r["Symbol"], float(r[col])) for _, r in t[t[col] >= CLOSE_GAP].sort_values(col, ascending=False).head(3).iterrows()]
+    t2 = s[(s["Өөрчлөлт (%)"].abs() >= SINGLE_MOVE) & (s["Хамгийн том хэлцлийн эзлэх (%)"] >= SINGLE_SHARE)]
+    single = [(r["Symbol"], float(r["Өөрчлөлт (%)"]), float(r["Хамгийн том хэлцлийн эзлэх (%)"]))
+              for _, r in t2.sort_values("Өөрчлөлт (%)", key=lambda x: -x.abs()).head(5).iterrows()]
+    biggest = [dict(sym=r["sym"], when=f"{SHORT_WD[r['dt'].weekday()]} {r['dt']:%H:%M:%S}", val=float(r["val"]), mkt=float(r["mkt"]),
+                    co=float(r["co"]), n=int(r["n"]), si="Sell Imbalance" in r["cond"], huge=bool(r["huge"]))
+               for _, r in biggest_by_company(df_all).iterrows()]
+    liq_up, liq_dn, liq_label = [], [], ""
+    if liq:
+        cur, base, liq_label = liq
+        rows = liq_rows(cur, base)
+
+        def mk(r, green):
+            ratio = r[2] / r[1]
+            rt = (f"{ratio:.1f}×" if ratio < 100 else f"{ratio:.0f}×") if ratio >= 2 else f"{r[3] * 100:+.0f}%"
+            return (r[0], r[1] / 1e6, r[2] / 1e6, rt, GREEN_C if green else RED_C)
+        GREEN_C, RED_C = (22, 160, 74), (220, 38, 38)
+        liq_up = [mk(r, True) for r in sorted([r for r in rows if r[3] > 0], key=lambda r: -r[3])[:3]]
+        liq_dn = [mk(r, False) for r in sorted([r for r in rows if r[3] < 0], key=lambda r: r[3])[:3]]
+    impact = dict(order=ORDER_SIZE / 1e6, thin_pct=THIN_PCT,
+                  best=[(r["Symbol"], float(r[COL_IMPACT])) for _, r in s.sort_values(COL_IMPACT).head(3).iterrows()],
+                  thin=[(r["Symbol"], float(r[COL_IMPACT])) for _, r in s[s[COL_IMPACT] >= THIN_PCT].sort_values(COL_IMPACT, ascending=False).head(6).iterrows()])
+    streak_up, streak_dn = [], []
+    if wk["n_ret"] >= 3:
+        ups = wk["updays"]
+        streak_up = [k for k in s["Symbol"] if ups.get(k, (0, 0))[1] >= 3 and ups[k][0] == ups[k][1]][:4]
+        streak_dn = [k for k in s["Symbol"] if ups.get(k, (0, 0))[1] >= 3 and ups[k][0] == 0][:4]
+    vol = t.sort_values("Өдрийн дундаж хэлбэлзэл (%)", ascending=False)
+    corr_pos, corr_neg = [], []
+    if wk["corr"] is not None:
+        pairs = wk["corr"]
+        corr_pos = [(a, b, float(r)) for a, b, r in pairs[pairs["r"] > 0].head(2)[["a", "b", "r"]].itertuples(index=False)]
+        corr_neg = [(a, b, float(r)) for a, b, r in pairs[pairs["r"] < 0].tail(2).iloc[::-1][["a", "b", "r"]].itertuples(index=False)]
+    hrs = hourly(df)
+    extras = dict(streak_up=streak_up, streak_dn=streak_dn,
+                  vol=[(r["Symbol"], float(r["Өдрийн дундаж хэлбэлзэл (%)"])) for _, r in vol.head(3).iterrows()],
+                  calm=[(r["Symbol"], float(r["Өдрийн дундаж хэлбэлзэл (%)"])) for _, r in vol.tail(3).iloc[::-1].iterrows()],
+                  corr_pos=corr_pos, corr_neg=corr_neg,
+                  hours=[(r["Цаг"][:2] + "ц", float(r["Эзлэх хувь (%)"])) for _, r in hrs.iterrows()])
+    return dict(label=label, range=f"{week[0][5:]} → {week[-1][5:]}", deals=len(df_all), total_all=total_all, total_core=total,
+                has_huge=bool(df_all["huge"].any()), ndays=len(week), ncomp=len(s),
+                avg_change=(total / len(week) / prev_avg - 1) * 100 if prev_avg else None,
+                huge_rule=f"≥{HUGE_VALUE / 1e9:g} тэрбум ₮ эсвэл компанийн дүнгийн {HUGE_SHARE:.0f}%+",
+                huge=huge, days=days, index=index, prices=prices, up3=up3, dn3=dn3, weak=weak, strong=strong, single=single,
+                biggest=biggest, liq_label=liq_label, liq_up=liq_up, liq_dn=liq_dn, impact=impact, extras=extras)
+
+
+def weekly_caption(ctx):
+    """Зурагтай хамт илгээх товч тайлбар (Telegram-ийн хязгаар 1024 тэмдэгт)."""
+    ix = ctx["index"]
+    L = [f"📊 МХБ 7 хоног {ctx['label']} ({ctx['range']})",
+         f"{ctx['deals']:,} хэлцэл · {mn(ctx['total_all'])}" + (f" (онцгойгүй {mn(ctx['total_core'])})" if ctx["has_huge"] else ""),
+         f"📈 МХБ-н 20: тэнцүү {pct(ix['eq'])} · жигнэсэн {pct(ix['vw'])} · ↑{ix['up']} ↓{ix['dn']} ={ix['flat']}"]
+    if ctx["huge"]:
+        L.append("🐋 Онцгой том хэлцэл: " + ", ".join(f"{h['sym']} {mn(h['val'])}" for h in ctx["huge"][:3]))
+    L.append(DISCLAIMER_SHORT)
+    return "\n".join(L)
+
+
 def write_text(path, latest_name, text):
     path.write_text(text + "\n", encoding="utf-8")
     shutil.copyfile(path, REPORT_DIR / latest_name)
@@ -714,7 +799,7 @@ def run_weekly(arg=None):
         return 1
     ref = date.fromisoformat(arg or days[-1])
     monday = ref - timedelta(days=ref.weekday())
-    week = [d for d in days if monday <= date.fromisoformat(d) <= monday + timedelta(days=6)]
+    week = [d for d in days if monday <= date.fromisoformat(d) <= monday + timedelta(days=4)]   # Даваа–Баасан
     if not week:
         print("Тухайн 7 хоногт өгөгдөл алга.")
         return 1
@@ -786,8 +871,8 @@ def run_weekly(arg=None):
     n_ret = int(rch.notna().any(axis=0).sum())
     updays = {k: (int((rch.loc[k] > 0).sum()), int(rch.loc[k].notna().sum())) for k in rch.index}
     corr_pairs = None
-    if n_ret >= 3:
-        cm = rch.T.corr(min_periods=3)
+    if n_ret >= 4:  # 3 цэгээр корреляци үргэлж ±1 гарах тул 4+ өдрийн өгөөж шаардана
+        cm = rch.T.corr(min_periods=4)
         cp = [(a_, b_, cm.loc[a_, b_]) for i_, a_ in enumerate(cm.index) for b_ in cm.index[i_ + 1:] if pd.notna(cm.loc[a_, b_])]
         corr_pairs = pd.DataFrame(cp, columns=["a", "b", "r"]).sort_values("r", ascending=False).reset_index(drop=True)
     wk = {"days": days_tbl, "n_ret": n_ret, "updays": updays, "corr": corr_pairs}
@@ -810,6 +895,18 @@ def run_weekly(arg=None):
     save_book(REPORT_DIR / f"weekly_{label}.xlsx", sheets)
     write_text(REPORT_DIR / f"weekly_{label}.txt", "latest_weekly.txt",
                weekly_text(label, week, df_all, df, s, prev_avg, liq, wk))
+    # нэг өндөр чанартай зураг (амжилтгүй бол текст тайлан хэвээр илгээгдэнэ)
+    for stale in ("latest_weekly.png", "latest_weekly_caption.txt"):
+        (REPORT_DIR / stale).unlink(missing_ok=True)
+    try:
+        import render_image
+        ctx = weekly_ctx(label, week, df_all, df, s, prev_avg, liq, wk)
+        png = render_image.render_weekly(ctx, REPORT_DIR / f"weekly_{label}.png")
+        shutil.copyfile(png, REPORT_DIR / "latest_weekly.png")
+        (REPORT_DIR / "latest_weekly_caption.txt").write_text(weekly_caption(ctx) + "\n", encoding="utf-8")
+        print(f"Зураг бэлэн: {png}")
+    except Exception as exc:  # noqa: BLE001
+        print("Зураг үүсгэж чадсангүй (текст тайлан хэвээр):", repr(exc))
     print(f"7 хоногийн шинжилгээ бэлэн: {REPORT_DIR}/weekly_{label}.xlsx ({len(week)} өдөр)")
     return 0
 
@@ -820,29 +917,20 @@ def ub_today():
     return (datetime.now(timezone.utc) + timedelta(hours=8)).date()  # Улаанбаатар UTC+8
 
 
-def week_path(monday):
-    iso = monday.isocalendar()
-    return REPORT_DIR / f"weekly_{iso.year}-W{iso.week:02d}.xlsx"
-
-
 def run_weekly_auto():
-    """Баасан гарагт энэ 7 хоногийг гаргана. Бусад өдөр өмнөх 7 хоногийн тайлан
-    хараахан гараагүй бол (жишээ нь Баасан гарагийн ажил алдагдсан) нөхөж гаргана.
+    """Зөвхөн Баасан гарагт (GitHub-ийн ажил хэт саатвал Бямба, Ням) энэ 7 хоногийн
+    Даваа–Баасан гарагийн арилжааны тайланг гаргана. Даваа–Пүрэв гарагт юу ч гаргахгүй.
     Бирж хэдэн өдөр ажиллаагүй ч байгаа өдрүүдээр тайлан гарна."""
     today = ub_today()
-    monday = today - timedelta(days=today.weekday())
-    if today.weekday() == 4:
-        target = monday
-    else:
-        target = monday - timedelta(days=7)
-        if week_path(target).exists():
-            print("Өмнөх 7 хоногийн тайлан гарсан тул алгасав.")
-            return 0
-    end = target + timedelta(days=6)
-    if not [d for d in all_days() if target <= date.fromisoformat(d) <= end]:
-        print(f"{target} долоо хоногт арилжааны өгөгдөл алга — тайлан гаргахгүй.")
+    if today.weekday() < 4:
+        print("Баасан гараг биш тул 7 хоногийн тайлан гаргахгүй.")
         return 0
-    return run_weekly(target.isoformat())
+    monday = today - timedelta(days=today.weekday())
+    end = monday + timedelta(days=4)
+    if not [d for d in all_days() if monday <= date.fromisoformat(d) <= end]:
+        print(f"{monday} долоо хоногт арилжааны өгөгдөл алга — тайлан гаргахгүй.")
+        return 0
+    return run_weekly(monday.isoformat())
 
 
 if __name__ == "__main__":
