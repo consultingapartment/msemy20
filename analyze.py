@@ -5,7 +5,7 @@
     python analyze.py weekly [YYYY-MM-DD]   # тухайн өдөр агуулсан 7 хоногийн (Да–Ба) шинжилгээ
     python analyze.py weekly-auto           # автомат: ЗӨВХӨН Баасан гарагт энэ 7 хоногийн (Да–Ба) тайланг гаргана
 
-Оролт : data/deals_YYYY-MM-DD.xlsx   (collect.py үүсгэсэн)
+Оролт : data/deals_YYYY-MM-DD.xlsx   (collect_deals.py үүсгэсэн)
 Гаралт: reports/daily_*.xlsx|txt, reports/weekly_*.xlsx|txt, reports/latest_daily.txt, latest_weekly.txt
 
 Үнийн тодорхойлолт:
