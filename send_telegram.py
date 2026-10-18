@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Шинжилгээний тайланг Telegram руу ЭГ НЭГ мессежээр илгээнэ (хэсэглэхгүй).
 
-    python send_telegram.py reports/latest_daily.txt reports/daily_2026-09-29.xlsx
+    python send_telegram.py reports/latest_daily.txt
+    python send_telegram.py reports/latest_weekly.txt --photo reports/latest_weekly.png --caption reports/latest_weekly_caption.txt
 
-1-р аргумент : мессеж болгох текст файл
-Үлдсэн       : хавсаргах файлууд (Excel)
+--photo өгвөл зургийг (товч тайлбартай) илгээнэ. Зураг илгээж чадахгүй бол текст тайланг нөөцөөр илгээнэ.
 
 Орчны хувьсагч (GitHub Secrets):
     TELEGRAM_BOT_TOKEN   BotFather-ээс авсан токен
@@ -16,8 +16,10 @@
 Тохируулаагүй бол чимээгүй алгасна. Ижил тайланг давхар илгээхээс сэргийлж
 reports/sent.json-д хэш хадгална.
 """
+import argparse
 import hashlib
 import json
+import mimetypes
 import os
 import sys
 import urllib.error
@@ -26,49 +28,58 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-LIMIT = 4096  # Telegram-ийн нэг мессежийн дээд урт
+LIMIT = 4096      # Telegram-ийн нэг мессежийн дээд урт
+CAPTION = 1024    # зургийн тайлбарын дээд урт
 
 
-def fit(text):
-    """Тайланг хэсэглэхгүй, нэг мессеж болгоно. analyze.py аль хэдийн MAX_CHARS-д багтаасан байдаг;
-    хэрэв 4096-аас хэтэрвэл (алдаатай тохиргоо) сүүлчийн бүтэн догол мөрөөр таслана."""
-    if len(text) <= LIMIT:
+def fit(text, limit=LIMIT):
+    """Тайланг хэсэглэхгүй, нэг мессеж болгоно. Хэтэрвэл сүүлчийн бүтэн догол мөрөөр таслана."""
+    if len(text) <= limit:
         return text
-    cut = text.rfind("\n\n", 0, LIMIT - 3)
-    return text[: cut if cut > 0 else LIMIT - 3].rstrip() + "\n…"
+    cut = text.rfind("\n\n", 0, limit - 3)
+    return text[: cut if cut > 0 else limit - 3].rstrip() + "\n…"
 
 
 def call(url, data, files=None):
-    """JSON эсвэл multipart хүсэлт. Алдаа гарвал токенгүй мэдээлэл өгнө."""
+    """JSON эсвэл multipart хүсэлт."""
     if files:
         boundary = uuid.uuid4().hex
         body = b""
         for k, v in data.items():
             body += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
         for k, path in files.items():
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; filename="{path.name}"\r\n'
-                     "Content-Type: application/octet-stream\r\n\r\n").encode() + path.read_bytes() + b"\r\n"
+                     f"Content-Type: {mime}\r\n\r\n").encode() + path.read_bytes() + b"\r\n"
         body += f"--{boundary}--\r\n".encode()
         req = urllib.request.Request(url, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     else:
         req = urllib.request.Request(url, data=urllib.parse.urlencode(data).encode())
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read().decode())
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        return 2
-    body_path = Path(sys.argv[1])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("text")
+    ap.add_argument("--photo")
+    ap.add_argument("--caption")
+    a = ap.parse_args()
+
+    body_path = Path(a.text)
     if not body_path.is_file():
         print("Текст файл олдсонгүй:", body_path)
         return 0
     text = body_path.read_text(encoding="utf-8").strip()
-    files = [Path(a) for a in sys.argv[2:] if a and Path(a).is_file()]
+    photo = Path(a.photo) if a.photo and Path(a.photo).is_file() else None
+    caption = None
+    if photo:
+        cap_path = Path(a.caption) if a.caption else None
+        caption = cap_path.read_text(encoding="utf-8").strip() if cap_path and cap_path.is_file() else text
+        caption = fit(caption, CAPTION)
 
     if os.environ.get("DRY_RUN") == "1":
-        print(text, "\n\nХавсралт:", [f.name for f in files])
+        print(text, "\n\nЗураг:", photo, "\nТайлбар:", caption)
         return 0
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -79,27 +90,40 @@ def main():
 
     reg = Path(os.environ.get("REPORT_DIR", "reports")) / "sent.json"
     sent = json.loads(reg.read_text()) if reg.exists() else []
-    digest = hashlib.sha1((text + "|" + ",".join(f.name for f in files)).encode("utf-8")).hexdigest()
+    h = hashlib.sha1(text.encode("utf-8"))
+    if photo:
+        h.update(photo.read_bytes())
+    digest = h.hexdigest()
     if digest in sent:
         print("Энэ тайланг өмнө нь илгээсэн тул алгасав.")
         return 0
 
     api = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/") + f"/bot{token}"
-    try:
-        call(api + "/sendMessage", {"chat_id": chat, "text": fit(text), "disable_web_page_preview": "true"})
-        for f in files:
-            call(api + "/sendDocument", {"chat_id": chat, "caption": f.name}, {"document": f})
-    except urllib.error.HTTPError as e:
-        print("Telegram алдаа:", e.code, e.read().decode("utf-8", "replace"))  # токеныг хэвлэхгүй
-        return 1
-    except (urllib.error.URLError, OSError) as e:
-        print("Telegram холболтын алдаа:", type(e).__name__)
+    done = False
+    if photo:
+        try:
+            call(api + "/sendPhoto", {"chat_id": chat, "caption": caption}, {"photo": photo})
+            print("Telegram руу зураг илгээлээ")
+            done = True
+        except urllib.error.HTTPError as e:
+            print("Зураг илгээж чадсангүй:", e.code, e.read().decode("utf-8", "replace"), "→ текстээр илгээнэ")
+        except (urllib.error.URLError, OSError) as e:
+            print("Зураг илгээх холболтын алдаа:", type(e).__name__, "→ текстээр илгээнэ")
+    if not done:
+        try:
+            call(api + "/sendMessage", {"chat_id": chat, "text": fit(text), "disable_web_page_preview": "true"})
+            print("Telegram руу текст илгээлээ")
+            done = True
+        except urllib.error.HTTPError as e:
+            print("Telegram алдаа:", e.code, e.read().decode("utf-8", "replace"))  # токеныг хэвлэхгүй
+        except (urllib.error.URLError, OSError) as e:
+            print("Telegram холболтын алдаа:", type(e).__name__)
+    if not done:
         return 1
 
     sent.append(digest)
     reg.parent.mkdir(parents=True, exist_ok=True)
     reg.write_text(json.dumps(sent[-200:]))
-    print(f"Telegram руу илгээлээ (текст + {len(files)} файл)")
     return 0
 
 
