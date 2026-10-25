@@ -33,7 +33,26 @@ MAX_PAGES = 80
 FIELDS = ["date", "open", "high", "low", "close", "qty", "value"]
 
 # Өмнөх кодоос авсан мэдэгдэж буй дугааруудын үр
-SEED_IDS = {"APU": 90, "TUM": 549, "TCK": 22, "SUU": 135, "MFC": 551, "GAZR": 565, "MMX": 208, "MGLA": 572}
+SEED_IDS = {"AARD": 336,
+    "ADB": 550,
+    "APU": 90,
+    "CUMN": 557,
+    "GLMT": 552,
+    "INV": 553,
+    "KHAN": 563,
+    "LEND": 545,
+    "MFC": 551,
+    "MNDL": 547,
+    "MSE": 510,
+    "QPAY": 570,
+    "SBM": 564,
+    "TDB": 567,
+    "TTL": 458,
+    "TUM": 549,
+    "XAC": 568,
+    "ERDN": 546,
+    "GAZR": 565,
+    "MFG": 997,}
 
 # Тайлан дахь 20 компани. ERDN-ийн арилжаа ERDN-O-0001 дээр гардаг тул тэр бүртгэлийг сонгоно.
 SYMBOL_OVERRIDE = {"ERDN": "ERDN-O-0001"}
