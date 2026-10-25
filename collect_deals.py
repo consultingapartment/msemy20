@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -40,9 +41,16 @@ def get_json(url, tries=4):
             time.sleep(3 * (i + 1))
 
 
+def short_sym(sym):
+    """APU-O-0000 -> APU, ERDN-O-0001 -> ERDN, хуучин ERDN-1 -> ERDN (өөр хэлбэр бол хэвээр)."""
+    t = str(sym)
+    m = re.fullmatch(r"([A-Za-z]+)-O-\d+", t) or re.fullmatch(r"([A-Za-z]+)-\d+", t)
+    return m.group(1) if m else t
+
+
 def build_code_map():
-    """symbol -> тоон код (companycode). /trades-ээс, дутвал /companies-ээс."""
-    codes = {}
+    """symbol -> тоон код (companycode). /trades-ээс, дутвал /companies-ээс. Мөн symbol -> нэр."""
+    codes, names = {}, {}
     try:
         for t in get_json(API + "/trades"):
             if t.get("symbol") and t.get("companycode") is not None:
@@ -54,9 +62,11 @@ def build_code_map():
             code = c.get("companycode", c.get("code"))
             if c.get("symbol") and code is not None:
                 codes.setdefault(c["symbol"], code)
+            if c.get("symbol") and (c.get("name") or c.get("companyName")):
+                names[c["symbol"]] = c.get("name") or c.get("companyName")
     except Exception as e:
         print("companies татаж чадсангүй:", e)
-    return codes
+    return codes, names
 
 
 def parse_dt(day, time_str):
@@ -72,11 +82,7 @@ def parse_dt(day, time_str):
 
 
 def short(sym):
-    """APU-O-0000 -> APU, ERDN-O-0001 -> ERDN-1 (өөр хэлбэр бол хэвээр)."""
-    p = str(sym).split("-")
-    if len(p) == 3 and p[1] == "O" and p[2].isdigit():
-        return p[0] if int(p[2]) == 0 else f"{p[0]}-{int(p[2])}"
-    return str(sym)
+    return short_sym(sym)
 
 
 def to_row(r):
@@ -133,8 +139,23 @@ def write_xlsx(path, rows_by_id):
     wb.save(path)
 
 
+def save_names(names, targets):
+    """Компанийн нэрийг data/companies.json-д хадгална (зургийн тайланд хэрэглэнэ)."""
+    path = OUT_DIR / "companies.json"
+    try:
+        cur = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except ValueError:
+        cur = {}
+    for sym, _ in targets:
+        if names.get(sym):
+            cur[short_sym(sym)] = names[sym]
+    if cur:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cur, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def main():
-    code_map = build_code_map()
+    code_map, names = build_code_map()
     targets, missing = [], []
     for code in CODES:
         syms = [s for s in code_map if s.startswith(code + "-O-")]
@@ -144,6 +165,8 @@ def main():
             missing.append(code)
     if missing:
         print("Тоон код олдсонгүй (алгасав):", ", ".join(missing))
+
+    save_names(names, targets)
 
     by_day = defaultdict(dict)  # өдөр -> {id: мөр}
     failed = []
