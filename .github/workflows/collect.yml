@@ -4,8 +4,10 @@ on:
   schedule:
     # Даваа–Баасан 13:30 (Улаанбаатар, UTC+8): хэлцэл цуглуулж, өдрийн тайлан гаргана
     - cron: "30 5 * * 1-5"
-    # Баасан 14:00 (Улаанбаатар): Даваа–Баасан гарагийн 7 хоногийн тайлан гаргана
+    # Баасан 14:00 (Улаанбаатар): Даваа–Баасан гарагийн 7 хоногийн тайлан, Долоо хоногийн компани, Мэдээ ба зах зээлийн хариу
     - cron: "0 6 * * 5"
+    # Лхагва 14:00 (Улаанбаатар): Арилжааны нэр томьёоны карт (сүүлийн 5 арилжааны өдрийн бодит жишээгээр)
+    - cron: "0 6 * * 3"
   workflow_dispatch:
     inputs:
       weekly:
@@ -16,6 +18,19 @@ on:
         description: "Өмнө илгээсэн ч Telegram руу дахин илгээх (туршилтад)"
         type: boolean
         default: false
+      agm:
+        description: "Хурлын тов шалгах (2–4 сарын дүрмийг үл харгалзан, туршилтад)"
+        type: boolean
+        default: false
+      extra:
+        description: "Нэг нэмэлт ажил гаргах (monthly/quarterly/yearly = сар/улирал/жилийн ханшийн хөдөлгөөн, spotlight, term, news, alltime = бүх цаг үеийн хаалтын ханш; history_probe = open.mse.mn шалгах; history_backfill = бүх түүх татах)"
+        type: choice
+        options: [none, monthly, quarterly, yearly, spotlight, term, news, alltime, history_probe, history_backfill]
+        default: none
+      week_of:
+        description: "Нэмэлт инфографикийг өөр долоо хоногоор гаргах бол тэр долоо хоногийн аль нэг өдөр (YYYY-MM-DD)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -29,6 +44,8 @@ env:
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
   FORCE_SEND: ${{ inputs.force }}
+  AGM_FORCE: ${{ inputs.agm }}
+  WEEK_OF: ${{ inputs.week_of }}
 
 jobs:
   run:
@@ -40,17 +57,21 @@ jobs:
           python-version: "3.12"
       - run: pip install openpyxl pandas pillow
 
-      - name: 0. Горим сонгох (өдөр эсвэл 7 хоног)
+      - name: 0. Горим сонгох (өдөр, 7 хоног, нэр томьёо эсвэл гараар нэмэлт)
         id: mode
         run: |
           if [ "${{ github.event.schedule }}" = "0 6 * * 5" ] || [ "${{ inputs.weekly }}" = "true" ]; then
             echo "mode=weekly" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 6 * * 3" ]; then
+            echo "mode=term" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.extra }}" ] && [ "${{ inputs.extra }}" != "none" ]; then
+            echo "mode=extra" >> "$GITHUB_OUTPUT"
           else
             echo "mode=daily" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Зурагт хэрэгтэй фонт суулгах (зөвхөн 7 хоногийн тайланд)
-        if: steps.mode.outputs.mode == 'weekly'
+      - name: Зурагт хэрэгтэй фонт суулгах (өдрийн горимоос бусад)
+        if: steps.mode.outputs.mode != 'daily'
         run: sudo apt-get install -y --no-install-recommends fonts-liberation fonts-dejavu-core
 
       - name: 1. Хэлцэл цуглуулах
@@ -65,6 +86,33 @@ jobs:
         continue-on-error: true
         run: python send_telegram.py reports/latest_daily.txt
 
+      - name: 3.1 Хурлын тов шалгах (2–4 сард өдөр бүр; шинэ хурал гарвал Telegram-аар мэдэгдэнэ)
+        if: always() && steps.mode.outputs.mode == 'daily'
+        continue-on-error: true
+        run: python agm_watch.py
+
+      - name: 3.3 Түүхэн хаалтын ханш шинэчлэх (open.mse.mn; эхний таталтын дараа л ажиллана)
+        if: always() && steps.mode.outputs.mode == 'daily'
+        continue-on-error: true
+        run: |
+          if [ -f data/history/security_ids.json ]; then python history_mse.py update; else echo "security_ids.json алга — алгасав"; fi
+
+      - name: 3.2 Мэдээ татах (өдөр бүр data/news.json-д хуримтлуулна)
+        if: always() && steps.mode.outputs.mode == 'daily'
+        continue-on-error: true
+        run: python extras.py news-collect
+
+      - name: 3.4 Сар, улирал, жилийн ханшийн хөдөлгөөн (шинэ сар эхлэхэд сүүлд дууссан үеийг нэг удаа илгээнэ)
+        if: always() && steps.mode.outputs.mode == 'daily'
+        continue-on-error: true
+        run: |
+          python extras.py periods-auto
+          for k in monthly quarterly yearly; do
+            if [ -f reports/latest_$k.png ]; then
+              python send_telegram.py reports/latest_$k.txt --photo reports/latest_$k.png --caption reports/latest_${k}_caption.txt || true
+            fi
+          done
+
       - name: 4. 7 хоногийн шинжилгээ ба Telegram (зөвхөн Баасан 14:00 эсвэл гараар)
         if: always() && steps.mode.outputs.mode == 'weekly'
         run: |
@@ -74,6 +122,55 @@ jobs:
             python analyze.py weekly
           fi
           python send_telegram.py reports/latest_weekly.txt --photo reports/latest_weekly.png --caption reports/latest_weekly_caption.txt || true
+
+      - name: 4.1 Долоо хоногийн компани (Баасан эсвэл гараар)
+        if: always() && (steps.mode.outputs.mode == 'weekly' || (steps.mode.outputs.mode == 'extra' && inputs.extra == 'spotlight'))
+        continue-on-error: true
+        run: |
+          python extras.py spotlight
+          python send_telegram.py reports/latest_spotlight.txt --photo reports/latest_spotlight.png --caption reports/latest_spotlight_caption.txt
+
+      - name: 4.2 Мэдээ ба зах зээлийн хариу (Баасан эсвэл гараар)
+        if: always() && (steps.mode.outputs.mode == 'weekly' || (steps.mode.outputs.mode == 'extra' && inputs.extra == 'news'))
+        continue-on-error: true
+        run: |
+          python extras.py news-collect
+          python extras.py news
+          python send_telegram.py reports/latest_news.txt --photo reports/latest_news.png --caption reports/latest_news_caption.txt
+
+      - name: 4.3 Арилжааны нэр томьёо (Лхагва эсвэл гараар)
+        if: always() && (steps.mode.outputs.mode == 'term' || (steps.mode.outputs.mode == 'extra' && inputs.extra == 'term'))
+        continue-on-error: true
+        run: |
+          python extras.py term
+          python send_telegram.py reports/latest_term.txt --photo reports/latest_term.png --caption reports/latest_term_caption.txt
+
+      - name: 4.4 Түүхэн ханш — open.mse.mn шалгах эсвэл бүх түүхийг татах (гараар)
+        if: always() && steps.mode.outputs.mode == 'extra' && (inputs.extra == 'history_probe' || inputs.extra == 'history_backfill')
+        continue-on-error: true
+        run: |
+          python history_mse.py discover
+          if [ "${{ inputs.extra }}" = "history_probe" ]; then
+            python history_mse.py probe-list
+            python history_mse.py probe APU
+            python history_mse.py probe KHAN
+          else
+            python history_mse.py backfill
+          fi
+
+      - name: 4.6 Сар, улирал, жилийн ханшийн хөдөлгөөн — инфографик (гараар)
+        if: always() && steps.mode.outputs.mode == 'extra' && (inputs.extra == 'monthly' || inputs.extra == 'quarterly' || inputs.extra == 'yearly')
+        continue-on-error: true
+        run: |
+          python extras.py ${{ inputs.extra }}
+          python send_telegram.py reports/latest_${{ inputs.extra }}.txt --photo reports/latest_${{ inputs.extra }}.png --caption reports/latest_${{ inputs.extra }}_caption.txt
+
+      - name: 4.5 Бүх цаг үеийн хаалтын ханш — инфографик (гараар)
+        if: always() && steps.mode.outputs.mode == 'extra' && inputs.extra == 'alltime'
+        continue-on-error: true
+        run: |
+          python extras.py alltime
+          python send_telegram.py reports/latest_alltime.txt --photo reports/latest_alltime.png --caption reports/latest_alltime_caption.txt
 
       - name: 5. Үр дүнг хадгалах (commit)
         if: always()
