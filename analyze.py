@@ -51,6 +51,13 @@ COL_IMPACT = f"{ORDER_SIZE / 1e6:g} сая ₮ захиалга / эргэлт (
 
 
 # ---------------------------------------------------------------- өгөгдөл унших
+def canon(sym):
+    """Хуучин файлд үлдсэн ERDN-1, APU-O-0000 зэрэг нэрийг зөвхөн кодоор (ERDN, APU) нэг мөр болгоно."""
+    t = str(sym)
+    m = re.fullmatch(r"([A-Za-z]+)-O-\d+", t) or re.fullmatch(r"([A-Za-z]+)-\d+", t)
+    return m.group(1) if m else t
+
+
 def all_days():
     days = []
     for p in DATA_DIR.glob("deals_*.xlsx"):
@@ -74,6 +81,7 @@ def flag_huge(df):
 
 def load_day(d):
     df = pd.read_excel(DATA_DIR / f"deals_{d}.xlsx", sheet_name="ALL").rename(columns=RENAME)
+    df["sym"] = df["sym"].map(canon)
     df["dt"] = pd.to_datetime(df["dt"])
     df["cond"] = df["cond"].fillna("").astype(str)
     df["day"] = df["dt"].dt.strftime("%Y-%m-%d")
