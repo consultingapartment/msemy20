@@ -4,23 +4,25 @@
 Файл бүр: "ALL" хуудас (бүх компани) + компани бүрийн тусдаа хуудас.
 Дахин ажиллуулбал хэлцлийн ID-аар давхардлыг арилгаж нэгтгэнэ.
 """
+#!/usr/bin/env python3
 import json
 import os
 import re
+import ssl
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-
 from openpyxl import Workbook, load_workbook
 
-API = "http://api.marketinfo.mn/api/mse"
+API = "https://api.marketinfo.mn/api/mse"
 OUT_DIR = Path(os.environ.get("OUT_DIR", "data"))
+SSL_CTX = ssl._create_unverified_context()
 
-# Бүртгэх компаниуд (symbol нь <КОД>-O-0000 хэлбэртэй)
 CODES = [
     "AARD", "ADB", "APU", "CUMN", "GLMT", "INV", "KHAN", "LEND", "MFC", "MNDL",
     "MSE", "QPAY", "SBM", "TDB", "TTL", "TUM", "XAC", "ERDN", "GAZR", "MFG",
@@ -30,11 +32,21 @@ HEADERS = ["Огноо цаг", "Symbol", "Үнэ (₮)", "Ширхэг", "Дү�
 
 
 def get_json(url, tries=4):
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+    }
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MSE-collector"})
-            with urllib.request.urlopen(req, timeout=30) as r:
+            req = urllib.request.Request(url, headers=req_headers)
+            with urllib.request.urlopen(req, timeout=30, context=SSL_CTX) as r:
                 return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if i == tries - 1:
+                body = e.read().decode("utf-8", errors="replace")[:300]
+                print(f"HTTP алдаа ({url}): код={e.code}, хариу={body}")
+                raise
+            time.sleep(3 * (i + 1))
         except Exception:
             if i == tries - 1:
                 raise
@@ -42,14 +54,12 @@ def get_json(url, tries=4):
 
 
 def short_sym(sym):
-    """APU-O-0000 -> APU, ERDN-O-0001 -> ERDN, хуучин ERDN-1 -> ERDN (өөр хэлбэр бол хэвээр)."""
     t = str(sym)
     m = re.fullmatch(r"([A-Za-z]+)-O-\d+", t) or re.fullmatch(r"([A-Za-z]+)-\d+", t)
     return m.group(1) if m else t
 
 
 def build_code_map():
-    """symbol -> тоон код (companycode). /trades-ээс, дутвал /companies-ээс. Мөн symbol -> нэр."""
     codes, names = {}, {}
     try:
         for t in get_json(API + "/trades"):
@@ -81,18 +91,14 @@ def parse_dt(day, time_str):
     return datetime.strptime(day, "%Y-%m-%d")
 
 
-def short(sym):
-    return short_sym(sym)
-
-
 def to_row(r):
     day = str(r.get("dates", ""))[:10]
     px = float(r["mdEntryPx"])
     sz = float(r["mdEntrySize"])
     cond = r.get("tradeCondition")
     cond = "" if cond in (None, "null") else cond
-    row = [parse_dt(day, r.get("mdEntryTime")), short(r["symbol"]), px, int(sz) if sz == int(sz) else sz,
-           px * sz, cond, r["id"]]
+    val_sz = int(sz) if sz == int(sz) else sz
+    row = [parse_dt(day, r.get("mdEntryTime")), short_sym(r["symbol"]), px, val_sz, px * sz, cond, r["id"]]
     return day, row
 
 
@@ -105,7 +111,7 @@ def read_existing(path):
         if i == 0 or r[6] is None:
             continue
         row = list(r[:7])
-        row[1] = short(row[1])  # хуучин файлын урт кодыг богиносгоно
+        row[1] = short_sym(row[1])
         rows[r[6]] = row
     return rows
 
@@ -140,7 +146,6 @@ def write_xlsx(path, rows_by_id):
 
 
 def save_names(names, targets):
-    """Компанийн нэрийг data/companies.json-д хадгална (зургийн тайланд хэрэглэнэ)."""
     path = OUT_DIR / "companies.json"
     try:
         cur = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -160,7 +165,8 @@ def main():
     for code in CODES:
         syms = [s for s in code_map if s.startswith(code + "-O-")]
         if syms:
-            targets += [(s, code_map[s]) for s in sorted(syms)]
+            for s in sorted(syms):
+                targets.append((s, code_map[s]))
         else:
             missing.append(code)
     if missing:
@@ -168,7 +174,7 @@ def main():
 
     save_names(names, targets)
 
-    by_day = defaultdict(dict)  # өдөр -> {id: мөр}
+    by_day = defaultdict(dict)
     failed = []
     for sym, num in targets:
         try:
@@ -190,11 +196,13 @@ def main():
 
     if not by_day:
         print("Хадгалах хэлцэл олдсонгүй.")
-    if failed:
-        print("Амжилтгүй:", ", ".join(failed))
+    if not targets or failed:
+        print("Амжилтгүй:", ", ".join(failed) if failed else "Компанийн жагсаалт татагдсангүй")
         return 1
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    if "ipykernel" not in sys.modules:
+        sys.exit(rc)
